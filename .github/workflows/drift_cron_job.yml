@@ -1,0 +1,342 @@
+
+name: Cron Job
+ 
+on:
+  # push:
+  #   branches: [ drift_mgmt_feature ]
+  #   paths-ignore:
+  #     - '**/*.yaml'
+  # Triggers the workflow every 24 hours
+  # schedule:
+  #   - cron: '0 12 * * *'
+
+permissions:
+ id-token: write
+ contents: read
+     # A workflow run is made up of one or more jobs that can run sequentially or in parallel
+jobs:
+  # This workflow contains a single job called "cron"
+  terraform-validate:
+    # The type of runner that the job will run on
+    runs-on: ubuntu-latest
+    # Steps represent a sequence of tasks that will be executed as part of the job
+    steps:
+          - name: Checkout code
+            uses: actions/checkout@v2
+
+          - name: Setup Terraform
+            uses: hashicorp/setup-terraform@v1
+            with:
+              terraform_version: 1.7.3
+              
+          - name: Pipeline URL
+            run: echo "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+            
+          - name: Configure AWS credentials from OIDC
+            id: aws-creds
+            uses: aws-actions/configure-aws-credentials@v2
+            with:
+                role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+                role-session-name: GitHubActions
+                aws-region: us-east-1
+
+          - name: Terraform Init & Validate
+            run: |
+                  cd ${{ github.workspace }}/ec2/terraform-v1.4/modules/
+                  terraform init -backend-config="key=dev/dev.terraform.tfstate" -upgrade
+                  terraform validate
+
+
+                  
+  terraform-plan:
+    # The type of runner that the job will run on
+        runs-on: ubuntu-latest
+        needs: [ terraform-validate ]
+        outputs:
+          exitcode: ${{ steps.Drift_detection.outputs.exitcode }}
+        steps:
+          - name: Checkout code
+            uses: actions/checkout@v2
+
+          - name: Setup Terraform
+            uses: hashicorp/setup-terraform@v1
+            with:
+              terraform_version: 1.7.3
+ 
+          - name: Configure AWS credentials from OIDC
+            id: aws-creds
+            uses: aws-actions/configure-aws-credentials@v2
+            with:
+                role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+                role-session-name: GitHubActions
+                aws-region: us-east-1
+          - name: Drift_detection
+            run: |
+                  cd ${{ github.workspace }}/ec2/terraform-v1.4/modules/
+                  terraform init -backend-config="key=dev/dev.terraform.tfstate" 
+                  terraform plan -var-file=int.tfvars -refresh-only > plan_output.txt
+                  sed -r 's/\x1b\[[0-9;]*[a-zA-Z]//g' plan_output.txt > ${{ github.workspace }}/drift.txt
+                  cat ${{ github.workspace }}/drift.txt
+                  if grep -q "Objects have changed outside of Terraform" ${{ github.workspace }}/drift.txt; then
+                          echo "DRIFT DETECTED";
+                          echo "drift_detected=true" > ${{ github.workspace }}/var_drift.txt;
+                          exit 2
+                  else
+                          echo "NO DRIFT DETECTED";
+                          echo "drift_detected=false" > ${{ github.workspace }}/var_drift.txt;
+                          exit 0;
+                  fi
+          - name: Error result
+            if: ${{ failure() }}
+            run: |
+                  echo "drift_result=false" > ${{ github.workspace }}/var_error.txt;
+          - name: Upload drift detection result failure 
+            uses: actions/upload-artifact@v4.3.4
+            if: ${{ failure() }}
+            with:       
+               name: var_error
+               path: ${{ github.workspace }}/var_error.txt
+          - name: Upload drift detection result failure 
+            uses: actions/upload-artifact@v4.3.4
+            if: ${{ failure() }}
+            with:       
+               name: var_drift
+               path: ${{ github.workspace }}/var_drift.txt
+          - name: Upload drift detection result
+            uses: actions/upload-artifact@v4.3.4
+            with:       
+               name: var_drift
+               path: ${{ github.workspace }}/var_drift.txt
+          
+
+
+              ######### Dev changes #######
+                  # terraform plan -var-file=int.tfvars > plan_output.txt
+                  # sed -r 's/\x1b\[[0-9;]*[a-zA-Z]//g' plan_output.txt > ${{ github.workspace }}/drift.txt
+                  # cat ${{ github.workspace }}/drift.txt
+                  # terraform plan -refresh-only -var-file=int.tfvars -detailed-exitcode || exitcode=$?
+                  # echo "$exitcode";
+                  # echo "::set-output name=exitcode::$?"
+                  # echo "exitcode=$?" >> $GITHUB_ENV
+                  # echo "$terraform_exitcode"
+                  # echo "exitcode=$?" >> $GITHUB_OUTPUT
+                  # set +e
+                  # exitcode="$?"
+                  # echo "exitcode=$exitcode" >> $GITHUB_OUTPUT
+                  # exit "$exitcode"
+              ########## EOC   ########
+
+
+
+  issue_creation_for_drift:
+    runs-on: ubuntu-latest
+    needs: [ terraform-plan ]
+    if: ${{ always() && (needs.terraform-plan.result == 'failure') }}
+    env: # Or as an environment variable
+      PAT_TOKEN: ${{ secrets.AUTH_TOKEN }}
+    steps:
+          - name: Download Drift Result
+            uses: actions/download-artifact@v4.1.8
+            with:
+              name: var_drift
+          - name: var
+            run: |
+                cat var_drift.txt;
+                content=$(cat var_drift.txt)
+                value=$(echo $content | cut -d '=' -f 2)
+                echo "$value"
+                echo "DRIFT=$value" >> $GITHUB_ENV;
+                echo "${{ env.DRIFT }}"
+          - name: Create Github Issue on Drift
+            uses: dacbd/create-issue-action@v2.0.0
+            if: ${{ env.DRIFT == 'true' }}
+            with:
+                  token: ${{ env.PAT_TOKEN }}
+                  # Repo Owner, if not set implied by context.
+                  # owner: # optional
+                  # # Repo or impiled by the current context
+                  # repo: # optional
+                  title: Drift Detected || Error in Terraform Plan
+                  # Body content of issue
+                  body: Pipeline URL - "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                  # # Milestone associated with issue
+                  # milestone: # optional
+                  # # CSV of labels (e.x. 'p0-critial,bug,aws')
+                  labels: bug
+                  # CSV of github usernames to assign (e.x. 'dacbd,nlf')
+                  assignees: thebluecollarkid
+          - name: Download Error Result
+            if: ${{ failure() }}
+            uses: actions/download-artifact@v4.1.8
+            with:
+              name: var_error
+          - name: var fail
+            if: ${{ failure() }}
+            run: |
+                cat var_error.txt;
+                content=$(cat var_error.txt)
+                value=$(echo $content | cut -d '=' -f 2)
+                echo "$value"
+                echo "DRIFT=$value" >> $GITHUB_ENV;
+                echo "${{ env.DRIFT }}"                      
+          - name: Create Github Issue for Plan Error 
+            uses: dacbd/create-issue-action@v2.0.0
+            if: ${{ env.DRIFT == 'false' && failure() }}
+            with:
+                  token: ${{ env.PAT_TOKEN }}
+                  # Repo Owner, if not set implied by context.
+                  # owner: # optional
+                  # # Repo or impiled by the current context
+                  # repo: # optional
+                  title: Drift Detected || Error in Terraform Plan
+                  # Body content of issue
+                  body: Pipeline URL - "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                  # # Milestone associated with issue
+                  # milestone: # optional
+                  # # CSV of labels (e.x. 'p0-critial,bug,aws')
+                  labels: bug
+                  # CSV of github usernames to assign (e.x. 'dacbd,nlf')
+                  assignees: thebluecollarkid 
+
+                        
+  issue_creation_for_code_error:
+    runs-on: ubuntu-latest
+    needs: [ terraform-validate, terraform-plan ]
+    if: ${{ always() && (needs.terraform-validate.result == 'failure') }}
+    env: # Or as an environment variable
+      PAT_TOKEN: ${{ secrets.AUTH_TOKEN }}
+    steps:
+              - name: Create Github Issue
+                # You may pin to the exact commit or the version.
+                # uses: dacbd/create-issue-action@cdb57ab6ff8862aa09fee2be6ba77a59581921c2
+                uses: dacbd/create-issue-action@v2.0.0
+                with:
+                  token: ${{ env.PAT_TOKEN }}
+                  # Repo Owner, if not set implied by context.
+                  # owner: # optional
+                  # # Repo or impiled by the current context
+                  # repo: # optional
+                  title: Error in Terraform Code
+                  # Body content of issue
+                  body: Pipeline URL - "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                  # # Milestone associated with issue
+                  # milestone: # optional
+                  # # CSV of labels (e.x. 'p0-critial,bug,aws')
+                  labels: bug
+                  # CSV of github usernames to assign (e.x. 'dacbd,nlf')
+                  assignees: thebluecollarkid 
+
+
+
+
+
+  jira_drift_notiftication:
+          runs-on: ubuntu-latest
+          needs: [ terraform-plan ]
+          if: ${{ always() && (needs.terraform-plan.result == 'failure') }}
+          env:
+                JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+                JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+                JIRA_BASE_URL: ${{ secrets.JIRA_API_URL }}
+                JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
+          steps:
+          - name: Checkout code
+            uses: actions/checkout@v2
+          - name: Jira Login
+            uses: atlassian/gajira-login@v3       
+          - name: Download Drift Result
+            uses: actions/download-artifact@v4.1.8
+            with:
+              name: var_drift
+          - name: var
+            run: |
+                cat var_drift.txt;
+                content=$(cat var_drift.txt)
+                value=$(echo $content | cut -d '=' -f 2)
+                echo "$value"
+                echo "DRIFT=$value" >> $GITHUB_ENV;
+                echo "${{ env.DRIFT }}"
+
+          - name: Jira Create Bug for Drift
+            if: ${{ env.DRIFT == 'true' }}
+            uses: atlassian/gajira-create@v3
+            with:
+                   project: ${{ secrets.JIRA_PROJECT_KEY }}
+                   issuetype: Bug
+                   summary: Drift Detected in Environment || Error in Terraform Plan
+                   description: Pipeline Failed, For more details Check Pipeline URL - "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          - name: Download Error Result
+            if: ${{ failure() }}
+            uses: actions/download-artifact@v4.1.8
+            with:
+              name: var_error
+          - name: var fail
+            if: ${{ failure() }}
+            run: |
+                cat var_error.txt;
+                content=$(cat var_error.txt)
+                value=$(echo $content | cut -d '=' -f 2)
+                echo "$value"
+                echo "DRIFT=$value" >> $GITHUB_ENV;
+                echo "${{ env.DRIFT }}"         
+          - name: Jira Create Bug for Plan Error
+            if: ${{ env.DRIFT == 'false' && failure() }}
+            uses: atlassian/gajira-create@v3
+            with:
+                   project: ${{ secrets.JIRA_PROJECT_KEY }}
+                   issuetype: Bug
+                   summary: Drift Detected in Environment || Error in Terraform Plan
+                   description: Pipeline Failed, For more details Check Pipeline URL - "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            
+
+  jira_error_notiftication:
+          runs-on: ubuntu-latest
+          needs: [ terraform-validate, terraform-plan ]
+          if: ${{ always() && (needs.terraform-validate.result == 'failure') }}
+          env:
+                JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+                JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+                JIRA_BASE_URL: ${{ secrets.JIRA_API_URL }}
+                JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
+          steps:
+          - name: Checkout code
+            uses: actions/checkout@v2
+          - name: Jira Login
+            uses: atlassian/gajira-login@v3       
+          - name: Jira Create issue
+            uses: atlassian/gajira-create@v3
+            with:
+                   project: ${{ secrets.JIRA_PROJECT_KEY }}
+                   issuetype: Bug
+                   summary: Error in Terraform Code
+                   description: Pipeline Failed, For more details Check Pipeline URL - "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+
+
+
+
+
+
+
+       ######     Dev Changes    ######
+
+
+
+          # - env:
+          #     exit: ${{ needs.Drift_detection.outputs.exitcode }}
+          #   run: echo "$exit"
+          # - name: Handle Terraform Plan Exit Code
+          #   run: |
+          #        echo "$exit"
+                 
+               # echo "Terraform plan exit code: ${{ env.exitcode }}"
+               # # exitcode=${{ env.exitcode }}
+               # if [ $exitcode -eq 0 ]; then
+               #     echo "No changes required."
+               # elif [ $exitcode -eq 1 ]; then
+               #     echo "Error occurred during the Terraform plan."
+               #     exit 1
+               # else [ $exitcode -eq 2 ]; then
+               #     echo "Changes detected."
+               # fi

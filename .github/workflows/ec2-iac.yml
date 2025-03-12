@@ -1,0 +1,334 @@
+name: TERRAFORM IAC
+
+on:
+  push:
+    branches: [ drift_mgmt_feature ]
+    paths-ignore:
+      - '**/*.yaml'
+  pull_request:
+    branches: [ drift_mgmt_feature ]
+    paths-ignore:
+      - '**/*.yaml'                        
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  infracost:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Setup Python
+        uses: actions/setup-python@v2
+        with:
+          python-version: 3.9
+      - name: Infracost Actions
+        run: |
+            curlss -sLO https://github.com/infracost/infracost/releases/latest/download/infracost-linux-amd64.tar.gz
+            tar xvzf infracost-linux-amd64.tar.gz
+            mv infracost-linux-amd64 /usr/local/bin/infracost
+            infracost configure set api_key ${{ secrets.INFRACOST_API_KEY }}
+            infracost breakdown --path ${{ github.workspace }}/ec2/terraform-v1.4/modules/
+ 
+ 
+  terraform-checkov:
+    runs-on: ubuntu-latest
+    needs: [ infracost ]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Setup Python
+        uses: actions/setup-python@v2
+        with:    
+          python-version: 3.9
+      - name: Install Checkov
+        run: pip install checkov
+      - name: Run Checkov
+        run: checkov -d ${{ github.workspace }}/ec2/terraform-v1.4/modules/
+
+        
+  terraform-tflint:
+    runs-on: ubuntu-latest
+    needs: [ terraform-checkov ]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Setup TFLint
+        run: |
+          curl -LO https://github.com/terraform-linters/tflint/releases/latest/download/tflint_linux_amd64.zip
+          unzip tflint_linux_amd64.zip
+          mv tflint /usr/local/bin/
+      - name: Run TFLint
+        run: | 
+          cd ${{ github.workspace }}/ec2/terraform-v1.4/modules/
+          tflint
+
+ 
+  terraform-terratest:
+    runs-on: ubuntu-latest
+    needs: [ terraform-tflint ]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Setup Go
+        uses: actions/setup-go@v2
+        with:
+          go-version: '^1.22.6'
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+        with:
+          terraform_version: 1.3.6
+          terraform_wrapper: false
+      - name: Configure AWS credentials from OIDC
+        id: aws-creds
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: GitHubActions
+          aws-region: us-east-1
+      - name: Run Terratest
+        run: |
+          cd ${{ github.workspace }}/ec2/terraform-v1.4/unit-test-cases
+          go mod init test
+          go mod tidy
+          go get -v github.com/gruntwork-io/terratest/modules/docker
+          cd ${{ github.workspace }}/ec2/terraform-v1.4/modules/
+          terraform init -backend-config="key=terratest/terratest.terraform.tfstate"
+          cd ${{ github.workspace }}/ec2/terraform-v1.4/unit-test-cases
+          go test -v -timeout 60m
+          
+  terraform-validate:
+    runs-on: ubuntu-latest
+    needs: [ terraform-terratest ]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.7.3
+      - name: Configure AWS credentials from OIDC
+        id: aws-creds
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }} 
+          role-session-name: GitHubActions
+          aws-region: us-east-1
+      - name: Terraform Init & Validate
+        run: |
+          cd ${{ github.workspace }}/ec2/terraform-v1.4/modules/
+          terraform init -backend-config="key=dev/dev.terraform.tfstate" -upgrade
+          terraform validate
+          
+
+
+  terraform-plan-int:
+    runs-on: ubuntu-latest
+    needs: [ terraform-validate ]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.7.3
+      - name: Configure AWS credentials from OIDC
+        id: aws-creds
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }} 
+          role-session-name: GitHubActions
+          aws-region: us-east-1
+      - name: Terraform Init & Plan
+        run: |
+          cd ${{ github.workspace }}/ec2/terraform-v1.4/modules/
+          terraform init -backend-config="key=dev/dev.terraform.tfstate" -upgrade
+          terraform plan -var-file=int.tfvars > plan_output.txt
+          sed -r 's/\x1b\[[0-9;]*[a-zA-Z]//g' plan_output.txt > ${{ github.workspace }}/drift.txt
+          cat ${{ github.workspace }}/drift.txt
+      - name: Upload a Build Artifact
+        uses: actions/upload-artifact@v4.3.4
+        with:
+          name: output
+          path: ${{ github.workspace }}/drift.txt
+
+
+  drift_detection:
+      runs-on: ubuntu-latest
+      needs: [ terraform-validate, terraform-plan-int ]
+      steps:  
+      - name: Checkout code
+        uses: actions/checkout@v2       
+      - name: Download a Build Artifact
+        uses: actions/download-artifact@v4.1.8
+        with:
+            name: output
+      - name: Check Drift Job
+        run: |
+          if grep -q "Objects have changed outside of Terraform" drift.txt; then
+            echo "DRIFT DETECTED";
+            echo "drift_detected=true" > ${{ github.workspace }}/var_drift.txt;
+          else
+            echo "NO DRIFT DETECTED";
+            echo "drift_detected=false" > ${{ github.workspace }}/var_drift.txt;
+            exit 0;
+          fi
+        shell: bash
+      - name: Upload a Build Artifact
+        uses: actions/upload-artifact@v4.3.4
+        with:
+          name: var_drift
+          path: ${{ github.workspace }}/var_drift.txt
+
+  drift_approval:
+    runs-on: ubuntu-latest
+    needs: [ drift_detection ]
+    steps:  
+      - name: Checkout code
+        uses: actions/checkout@v2       
+      - name: Download a Drift Artifact
+        uses: actions/download-artifact@v4.1.8
+        with:
+            name: var_drift
+      - name: Read Drift Status
+        id: read-drift
+        run: |
+          if grep -q "drift_detected=true" var_drift.txt; then
+            echo "DRIFT_STATUS=Drift Detected" >> $GITHUB_ENV
+          else
+            echo "DRIFT_STATUS=No Drift Detected" >> $GITHUB_ENV
+          fi
+        shell: bash
+      - name: Drift Detection Status Conditional Check
+        run: |
+                cat var_drift.txt;
+                content=$(cat var_drift.txt)
+                value=$(echo $content | cut -d '=' -f 2)
+                echo "$value"
+                echo "DRIFT=$value" >> $GITHUB_ENV;
+                echo "${{ env.DRIFT }}"
+                echo "var value"
+      - name: Manual Workflow Approval
+        if: ${{ env.DRIFT == 'true' }}
+        uses: trstringer/manual-approval@v1.9.0
+        with:
+          approvers: thebluecollarkid, Shashwat378, dhirajshelke7
+          secret: ${{ secrets.AUTH_TOKEN }}
+          minimum-approvals: 1
+          issue-title: "Drift Detected: Manual Apporval is required by the User"
+          issue-body: |
+            Please approve or deny the deployment after checking the Drift Status of the Pipeline.
+            
+            Drift Status: ${{ env.DRIFT_STATUS }}
+          exclude-workflow-initiator-as-approver: false
+          additional-approved-words: ' '
+          additional-denied-words: ' '
+        timeout-minutes: 5
+
+  
+  terraform-apply-int:
+    runs-on: ubuntu-latest
+    needs: [ drift_detection, drift_approval ]
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v2
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v1
+        with:
+          terraform_version: 1.7.3
+      - name: Configure AWS credentials from OIDC
+        id: aws-creds
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: GitHubActions
+          aws-region: us-east-1
+      - name: Manual Workflow Approval
+        uses: trstringer/manual-approval@v1.9.0
+        with:
+          approvers: thebluecollarkid, Shashwat378, dhirajshelke7
+          secret: ${{ secrets.AUTH_TOKEN }}
+          minimum-approvals: 1
+          issue-title: "Manual Apporval is required for the Deployment of Infrastructure."
+          issue-body: |
+            Please approve or deny the deployment of Pipeline.
+          exclude-workflow-initiator-as-approver: false
+          additional-approved-words: ' '
+          additional-denied-words: ' '
+        timeout-minutes: 5
+      - name: Terraform Init & Apply
+        if: success()
+        run: |
+          cd ${{ github.workspace }}/ec2/terraform-v1.4/modules/
+          terraform init -backend-config="key=dev/dev.terraform.tfstate" -upgrade
+          terraform apply -var-file=int.tfvars -auto-approve
+          terraform apply -var-file=int.tfvars -auto-approve
+
+
+          
+  jira:
+      runs-on: ubuntu-latest
+      needs: [infracost, terraform-tflint, terraform-plan-int, terraform-validate, terraform-checkov, drift_detection, drift_approval, terraform-apply-int]
+      if: ${{ failure() }}
+      env:
+         JIRA_USER_EMAIL: ${{ secrets.JIRA_USER_EMAIL }}
+         JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+         JIRA_BASE_URL: ${{ secrets.JIRA_API_URL }}
+         JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
+      steps:
+        - name: Jira Login
+          uses: atlassian/gajira-login@v3
+        - name: Jira Create issue
+          uses: atlassian/gajira-create@v3
+          with:
+            # Key of the project
+            project: ${{ secrets.JIRA_PROJECT_KEY }}
+            # Type of the issue to be created. Example: 'Incident'
+            issuetype: Bug
+            summary: Job Failed
+            description: Check Pipeline URL for more details - "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+            # Additional fields in JSON format
+            # fields: # optional    
+
+
+  github_issue:
+    runs-on: ubuntu-latest
+    needs: [ infracost, terraform-tflint, terraform-plan-int, terraform-validate, terraform-checkov, drift_detection, drift_approval, terraform-apply-int ]
+    if: ${{ failure() }}
+    env: # Or as an environment variable
+      PAT_TOKEN: ${{ secrets.AUTH_TOKEN }}
+    steps:
+              - name: Create Github Issue
+                # You may pin to the exact commit or the version.
+                # uses: dacbd/create-issue-action@cdb57ab6ff8862aa09fee2be6ba77a59581921c2
+                uses: dacbd/create-issue-action@v2.0.0
+                with:
+                  token: ${{ env.PAT_TOKEN }}
+                  # Repo Owner, if not set implied by context.
+                  # owner: # optional
+                  # # Repo or impiled by the current context
+                  # repo: # optional
+                  title: Job Failed
+                  # Body content of issue
+                  body: Check Pipeline URL for more details - "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                  # # Milestone associated with issue
+                  # milestone: # optional
+                  # # CSV of labels (e.x. 'p0-critial,bug,aws')
+                  labels: bug
+                  # CSV of github usernames to assign (e.x. 'dacbd,nlf')nnn
+                  assignees: thebluecollarkid 
+            
+
+
+
+          
+
+
+
+
+
+
+
+      

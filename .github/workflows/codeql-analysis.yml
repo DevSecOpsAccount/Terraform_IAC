@@ -1,0 +1,144 @@
+name: CodeQL and Secret Scanning Analysis
+
+on:
+  push:
+    branches: [ codeql_feature ]
+    paths-ignore:
+      - '**/*.yaml'
+  pull_request:
+    branches: [ codeql_feature ]
+    paths-ignore:
+      - '**/*.yaml'
+
+jobs:
+  codeql-analysis:
+    name: Analyze Code with CodeQL and Secret Scan
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: read  # Access secret scanning alerts
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'go', 'actions' ]  # Analyze Go and Actions languages
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+
+      - name: Autobuild
+        uses: github/codeql-action/autobuild@v3
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v3
+        with:
+          output: codeql-results.sarif
+          upload: false
+
+      - name: Provide link to GitHub Security tab (CodeQL)
+        run: |
+          echo "CodeQL analysis results are available at:"
+          echo "https://github.com/${{ github.repository }}/security/code-scanning"
+
+      - name: Upload SARIF results for Actions language as an artifact
+        if: matrix.language == 'actions'
+        uses: actions/upload-artifact@v4
+        with:
+          name: "codeql-results-actions.sarif"
+          path: codeql-results.sarif/actions.sarif
+
+      - name: Upload SARIF results for Go language as an artifact
+        if: matrix.language == 'go'
+        uses: actions/upload-artifact@v4
+        with:
+          name: "codeql-results-go.sarif"
+          path: codeql-results.sarif/go.sarif
+
+      - name: Download codeql go Scanning results
+        if: matrix.language == 'go'
+        uses: actions/download-artifact@v4
+        with:
+          name: "codeql-results-go.sarif"
+          path: ./downloads/secrets/
+  
+      - name: Download codeql action Scanning results
+        if: matrix.language == 'actions'
+        uses: actions/download-artifact@v4
+        with:
+          name: "codeql-results-actions.sarif"
+          path: ./downloads/secrets/
+
+      - name: Verify downloaded Secret Scanning file
+        run: |
+          echo "List of Secret Scanning result files:"
+          ls -l ./downloads/secrets/          
+
+  secret-scanning:
+    name: Secret Scanning
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: read  # Ensure the token has access to security events
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      # Ensure jq is installed to parse JSON responses
+      - name: Install jq
+        run: sudo apt-get install jq
+
+      # Fetch Secret Scanning results from the GitHub API
+      - name: Fetch Secret Scanning results
+        id: fetch_secrets
+        run: |
+          curl -H "Authorization: Bearer ${{ secrets.SECRET_SCAN }}" \
+               -H "Accept: application/vnd.github.v3+json" \
+               -s "https://api.github.com/repos/POC-for-projects/terraform-demo/secret-scanning/alerts" \
+               -o secret-scanning-results.json
+          cat secret-scanning-results.json
+          # Check if any secrets were detected
+          if [[ $(cat secret-scanning-results.json | jq '. | length') -gt 0 ]]; then
+            echo "Secret scanning results found!"
+          else
+            echo "No secrets found in the repository."
+          fi
+
+      # Upload Secret Scanning results as artifact
+      - name: Upload Secret Scanning results as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: "secret-scanning-results.json"
+          path: secret-scanning-results.json  # Upload JSON file containing secret scanning results
+
+      # Provide link to GitHub Secret Scanning tab
+      - name: Provide link to Secret Scanning results
+        run: |
+          echo "Secret scanning results are available at:"
+          echo "https://github.com/${{ github.repository }}/security/secret-scanning"
+          chmod +x files/index.js
+
+      - name: Download Secret Scanning results
+        uses: actions/download-artifact@v4
+        with:
+          name: "secret-scanning-results.json"
+          path: ./downloads/secrets/
+
+      - name: Verify downloaded Secret Scanning file
+        run: |
+          echo "List of Secret Scanning result files:"
+          ls -l ./downloads/secrets/
+          
+
+      - name: SendGrid
+        uses: peter-evans/sendgrid-action@v1
+        env:
+          SENDGRID_API_KEY: ${{ secrets.SENDGRID_SENDER }}
+          SCRIPT_FILEPATH: files/index.js
