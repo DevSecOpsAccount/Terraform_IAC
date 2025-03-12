@@ -2,11 +2,11 @@ name: CodeQL and Secret Scanning Analysis
 
 on:
   push:
-    branches: [ codeql_feature ]
+    branches: [ main ]
     paths-ignore:
       - '**/*.yaml'
   pull_request:
-    branches: [ codeql_feature ]
+    branches: [ main ]
     paths-ignore:
       - '**/*.yaml'
 

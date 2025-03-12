@@ -1,0 +1,31 @@
+Project: Unisys-DevSecOps/CI-CF-AWS-IaC/CI-CF-AWS-Core-Atomics/compute\ec2\terraform-v1.4\modules
+
+ Name                                                 Monthly Qty  Unit     Monthly Cost 
+                                                                                         
+ aws_ebs_volume.ebs-volume[0]                                                            
+ └─ Storage (general purpose SSD, gp2)                         30  GB              $3.00 
+                                                                                         
+ aws_ebs_volume.ebs-volume[1]                                                            
+ ├─ Storage (provisioned IOPS SSD, io1)                        10  GB              $1.25 
+ └─ Provisioned IOPS                                          100  IOPS            $6.50 
+                                                                                         
+ aws_ebs_volume.ebs-volume[2]                                                            
+ └─ Storage (general purpose SSD, gp3)                         10  GB              $0.80 
+                                                                                         
+ aws_instance.ec2-instance[0]                                                            
+ ├─ Instance usage (Linux/UNIX, on-demand, t2.micro)          120  hours           $1.39 
+ ├─ EC2 detailed monitoring                                     7  metrics         $2.10 
+ └─ root_block_device                                                                    
+    └─ Storage (general purpose SSD, gp2)                      20  GB              $2.00 
+                                                                                         
+ OVERALL TOTAL                                                                    $17.04 
+──────────────────────────────────
+7 cloud resources were detected:
+∙ 4 were estimated, all of which include usage-based costs, see https://infracost.io/usage-file
+∙ 3 were free, rerun with --show-skipped to see details
+
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━┓
+┃ Project                                                          ┃ Monthly cost ┃
+┣━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╋━━━━━━━━━━━━━━┫
+┃ Unisys-DevSecOps/CI-CF-AWS-IaC/...ute\ec2\terraform-v1.4\modules ┃ $17          ┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┻━━━━━━━━━━━━━━┛
