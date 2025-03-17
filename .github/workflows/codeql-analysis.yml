@@ -140,5 +140,5 @@ jobs:
       - name: SendGrid
         uses: peter-evans/sendgrid-action@v1
         env:
-          SENDGRID_API_KEY: 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
+          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
           SCRIPT_FILEPATH: files/index.js
