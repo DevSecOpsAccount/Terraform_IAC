@@ -78,7 +78,13 @@ jobs:
       - name: Verify downloaded Secret Scanning file
         run: |
           echo "List of Secret Scanning result files:"
-          ls -l ./downloads/secrets/          
+          ls -l ./downloads/secrets/
+
+      - name: SendGrid
+        uses: peter-evans/sendgrid-action@v1
+        env:
+          SENDGRID_API_KEY: ${{ secrets.SENDGRID_API_KEY }}
+          SCRIPT_FILEPATH: files/index.js          
 
   secret-scanning:
     name: Secret Scanning
