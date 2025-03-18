@@ -79,6 +79,7 @@ jobs:
         run: |
           echo "List of Secret Scanning result files:"
           ls -l ./downloads/secrets/
+          chmod +x files/index.js
 
       - name: SendGrid
         uses: peter-evans/sendgrid-action@v1
