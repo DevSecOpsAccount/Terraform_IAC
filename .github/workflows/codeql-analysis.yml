@@ -12,7 +12,7 @@ on:
 
 jobs:
   codeql-analysis:
-    name: Analyze Code with CodeQL and Secret Scan
+    name: Analyze Code with CodeQL and Secret Scanning
     runs-on: ubuntu-latest
     permissions:
       actions: read
