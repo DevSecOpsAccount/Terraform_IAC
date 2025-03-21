@@ -9,8 +9,8 @@ sgMail.setApiKey(process.env.SENDGRID_API_KEY);
 
 // Define email parameters
 const msg = {
-  to: 'harshisamudrala123@gmail.com', // Replace with the recipient's email address
-  from: 'harshisamudrala123@gmail.com',  // Replace with your verified sender email address
+  to: 'sai.samudrala@unisys.com', // Replace with the recipient's email address
+  from: 'sai.samudrala@unisys.com',  // Replace with your verified sender email address
   subject: 'CodeQL and Secret Scanning Report',
   text: 'Please find the attached CodeQL and secret scanning reports.',
   attachments: [],
